@@ -49,7 +49,7 @@ from sympy.functions.elementary.piecewise import Piecewise
 from sympy.functions.elementary.trigonometric import (TrigonometricFunction,
     cos, sin, tan, cot, csc, sec, acos, asin, atan, acot, acsc, asec)
 from sympy.functions.special.delta_functions import Heaviside, DiracDelta
-from sympy.functions.special.error_functions import (erf, erfi, fresnelc,
+from sympy.functions.special.error_functions import (erf, erfc, erfi, fresnelc,
     fresnels, Ci, Chi, Si, Shi, Ei, li)
 from sympy.functions.special.gamma_functions import uppergamma
 from sympy.functions.special.elliptic_integrals import elliptic_e, elliptic_f
@@ -1999,6 +1999,11 @@ def rewrites_rule(integral):
     if integrand.match(1/cos(symbol)):
         rewritten = integrand.subs(1/cos(symbol), sec(symbol))
         return RewriteRule(integrand, symbol, rewritten, integral_steps(rewritten, symbol))
+
+    if integrand.has(erfc):
+        rewritten = integrand.replace(erfc, lambda arg: 1 - erf(arg))
+        if rewritten != integrand:
+            return RewriteRule(integrand, symbol, rewritten, integral_steps(rewritten, symbol))
 
 def fallback_rule(integral):
     return DontKnowRule(*integral)
