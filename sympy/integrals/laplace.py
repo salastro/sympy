@@ -1259,6 +1259,9 @@ def _laplace_transform(fn, t_, s_, *, simplify):
     if simplify:
         result = result.simplify(doit=False)
     plane = Max(*planes)
+    if result.has(S.Infinity, S.NegativeInfinity, S.ComplexInfinity):
+        _debug("Laplace transform integral does not converge")
+        return LaplaceTransform(fn, t_, s_), S.NegativeInfinity, S.true
     condition = And(*conditions)
 
     return result, plane, condition
