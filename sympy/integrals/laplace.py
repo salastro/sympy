@@ -1251,6 +1251,11 @@ def _laplace_transform(fn, t_, s_, *, simplify):
             else:
                 r = (LaplaceTransform(ft, t_, s_), S.NegativeInfinity, True)
         (ri_, pi_, ci_) = r
+        if S(ri_).has(S.Infinity, S.NegativeInfinity, S.ComplexInfinity):
+            _debug(f"Result for term {ft} contains infinity, returning k*Unevaluated.")
+            ri_ = LaplaceTransform(ft, t_, s_)
+            pi_ = S.NegativeInfinity # Default plane for unevaluated
+            ci_ = S.true            # Default condition for unevaluated
         terms_s.append(k*ri_)
         planes.append(pi_)
         conditions.append(ci_)
@@ -1259,9 +1264,6 @@ def _laplace_transform(fn, t_, s_, *, simplify):
     if simplify:
         result = result.simplify(doit=False)
     plane = Max(*planes)
-    if result.has(S.Infinity, S.NegativeInfinity, S.ComplexInfinity):
-        _debug("Laplace transform integral does not converge")
-        return LaplaceTransform(fn, t_, s_), S.NegativeInfinity, S.true
     condition = And(*conditions)
 
     return result, plane, condition
