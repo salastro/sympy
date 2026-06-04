@@ -11,17 +11,14 @@ from sympy.core.function import diff
 from sympy.core.logic import fuzzy_bool
 from sympy.core.mul import Mul
 from sympy.core.numbers import oo, pi
-from sympy.core.relational import Ne
 from sympy.core.singleton import S
-from sympy.core.symbol import (Dummy, Symbol, Wild)
+from sympy.core.symbol import Dummy, Symbol
 from sympy.core.sympify import sympify
 from sympy.functions import Piecewise, sqrt, piecewise_fold, tan, cot, atan
-from sympy.functions.elementary.exponential import log
 from sympy.functions.elementary.integers import floor
 from sympy.functions.elementary.complexes import Abs, sign
 from sympy.functions.elementary.miscellaneous import Min, Max
 from sympy.functions.special.delta_functions import Heaviside
-from .rationaltools import ratint
 from sympy.matrices import MatrixBase
 from sympy.polys import Poly, PolynomialError
 from sympy.series.formal import FormalPowerSeries
@@ -235,20 +232,13 @@ class Integral(AddWithLimits):
         return f, F
 
 
-    def _apply_chain_rule_substitution(self, f, uvar, d):
+    def _apply_chain_rule_substitution(self, f, xvar, uvar, d):
         """
         Substitute each candidate in *f* into the integrand and require that
         all candidates yield the same expression (uniqueness check).
         """
         newfuncs = {
-            (self.function.subs(d, fi) * fi.diff(d)).subs(d, uvar)  # chain rule
-            # Note: original used xvar; using d as the dummy throughout
-            for fi in f
-        }
-        # Rebuild using the original pattern to stay faithful
-        newfuncs = {
-            (self.function.subs(self._resolve_xvar_from_f(f), fi) * fi.diff(d)
-             ).subs(d, uvar)
+            (self.function.subs(xvar, fi) * fi.diff(d)).subs(d, uvar)
             for fi in f
         }
         if len(newfuncs) > 1:
@@ -256,8 +246,6 @@ class Integral(AddWithLimits):
                 The mapping between F(x) and f(u) did not give
                 a unique integrand.'''))
         return newfuncs.pop()
-
-
     def _remap_integration_bounds(self, F, xvar, uvar, d, newfunc):
         """
         Walk ``self.limits`` and replace bounds that involve *xvar* using *F*.
@@ -418,7 +406,7 @@ class Integral(AddWithLimits):
 
         f, F = self._derive_forward_and_inverse_maps(x, u, xvar, uvar, d, solve, posify)
 
-        newfunc = _apply_chain_rule_substitution(self, f, uvar, d)
+        newfunc = self._apply_chain_rule_substitution(f, xvar, uvar, d)
 
         newlimits, newfunc = self._remap_integration_bounds(F, xvar, uvar, d, newfunc)
 
@@ -1748,6 +1736,4 @@ def _(expr):
     return shape(expr.function)
 
 # Delayed imports
-from .deltafunctions import deltaintegrate
-from .meijerint import meijerint_definite, meijerint_indefinite, _debug
-from .trigonometry import trigintegrate
+from .meijerint import meijerint_definite, _debug
