@@ -343,41 +343,20 @@ class Integral(AddWithLimits):
             a unique integrand.'''))
         newfunc = newfuncs.pop()
 
-        def _calc_limit_1(F, a, b):
-            """
-            replace d with a, using subs if possible, otherwise limit
-            where sign of b is considered
-            """
-            wok = F.subs(d, a)
-            if wok is S.NaN or wok.is_finite is False and a.is_finite:
-                return limit(sign(b)*F, d, a)
-            return wok
-
-        def _calc_limit(a, b):
-            """
-            replace d with a, using subs if possible, otherwise limit
-            where sign of b is considered
-            """
-            avals = list({_calc_limit_1(Fi, a, b) for Fi in F})
-            if len(avals) > 1:
-                raise ValueError(filldedent('''
-                The mapping between F(x) and f(u) did not
-                give a unique limit.'''))
-            return avals[0]
-
         newlimits = []
         for xab in self.limits:
             sym = xab[0]
             if sym == xvar:
                 if len(xab) == 3:
-                    a, b = xab[1:]
-                    a, b = _calc_limit(a, b), _calc_limit(b, a)
+                    a_val, b_val = xab[1:]
+                    a = _calc_limit(F, a_val, b_val, d)
+                    b = _calc_limit(F, b_val, a_val, d)
                     if fuzzy_bool(a - b > 0):
                         a, b = b, a
                         newfunc = -newfunc
                     newlimits.append((uvar, a, b))
                 elif len(xab) == 2:
-                    a = _calc_limit(xab[1], 1)
+                    a = _calc_limit(F, xab[1], 1, d)
                     newlimits.append((uvar, a))
                 else:
                     newlimits.append(uvar)
@@ -760,25 +739,9 @@ class Integral(AddWithLimits):
                         function = antideriv._eval_interval(x, a, b)
                         function = Poly(function, *gens)
                     else:
-                        def is_indef_int(g, x):
-                            return (isinstance(g, Integral) and
-                                    any(i == (x,) for i in g.limits))
-
-                        def eval_factored(f, x, a, b):
-                            # _eval_interval for integrals with
-                            # (constant) factors
-                            # a single indefinite integral is assumed
-                            args = []
-                            for g in Mul.make_args(f):
-                                if is_indef_int(g, x):
-                                    args.append(g._eval_interval(x, a, b))
-                                else:
-                                    args.append(g)
-                            return Mul(*args)
-
                         integrals, others, piecewises = [], [], []
                         for f in Add.make_args(antideriv):
-                            if any(is_indef_int(g, x)
+                            if any(_is_indef_int(g, x)
                                    for g in Mul.make_args(f)):
                                 integrals.append(f)
                             elif any(isinstance(g, Piecewise)
@@ -786,7 +749,7 @@ class Integral(AddWithLimits):
                                 piecewises.append(piecewise_fold(f))
                             else:
                                 others.append(f)
-                        uneval = Add(*[eval_factored(f, x, a, b)
+                        uneval = Add(*[_eval_factored(f, x, a, b)
                                        for f in integrals])
                         try:
                             evalued = Add(*others)._eval_interval(x, a, b)
@@ -1377,6 +1340,120 @@ class Integral(AddWithLimits):
             I += limit(((F.subs(x, s - r)) - F.subs(x, s + r)), r, 0, '+')
         return I
 
+
+### Module-level helper functions ###
+
+def _is_indef_int(g, x):
+    """Check if g is an indefinite integral with respect to x.
+    
+    Parameters
+    ==========
+    g : Expr
+        Expression to check
+    x : Symbol
+        Integration variable
+        
+    Returns
+    =======
+    bool
+        True if g is Integral(f, (x,)) for some f
+    """
+    return (isinstance(g, Integral) and
+            any(i == (x,) for i in g.limits))
+
+
+def _eval_factored(f, x, a, b):
+    """Evaluate a factored integral with constant factors at limits.
+    
+    Applies _eval_interval to indefinite integral factors and preserves
+    non-integral constant factors.
+    
+    Parameters
+    ==========
+    f : Expr
+        Expression, assumed to be a product of integral and constant factors
+    x : Symbol
+        Integration variable
+    a, b : Expr
+        Lower and upper limits
+        
+    Returns
+    =======
+    Expr
+        Product of evaluated integrals and preserved constant factors
+    """
+    # _eval_interval for integrals with (constant) factors
+    # a single indefinite integral is assumed
+    args = []
+    for g in Mul.make_args(f):
+        if _is_indef_int(g, x):
+            args.append(g._eval_interval(x, a, b))
+        else:
+            args.append(g)
+    return Mul(*args)
+
+
+def _calc_limit_1(F, a, b, d):
+    """Calculate limit of F as d → a, considering sign of b.
+    
+    Replaces d with a using substitution if possible, otherwise uses limit.
+    The sign of b is used to determine direction of approach.
+    
+    Parameters
+    ==========
+    F : Expr
+        Expression containing dummy variable d
+    a : Expr
+        Target value for d
+    b : Expr
+        Sign reference value
+    d : Symbol
+        The dummy variable to substitute
+        
+    Returns
+    =======
+    Expr
+        Limit of F as d → a
+    """
+    wok = F.subs(d, a)
+    if wok is S.NaN or wok.is_finite is False and a.is_finite:
+        return limit(sign(b)*F, d, a)
+    return wok
+
+
+def _calc_limit(F_list, a, b, d):
+    """Calculate limit from a list of F values.
+    
+    Applies _calc_limit_1 to each element in F_list and verifies that
+    all results are identical (to ensure a unique limit).
+    
+    Parameters
+    ==========
+    F_list : list[Expr]
+        List of F values (from different solution branches)
+    a : Expr
+        Target value for d
+    b : Expr
+        Sign reference value
+    d : Symbol
+        The dummy variable to substitute
+        
+    Returns
+    =======
+    Expr
+        The unique limit value
+        
+    Raises
+    ======
+    ValueError
+        If different F values produce different limits
+    """
+    avals = list({_calc_limit_1(Fi, a, b, d) for Fi in F_list})
+    if len(avals) > 1:
+        raise ValueError(filldedent('''
+            The mapping between F(x) and f(u) did not
+            give a unique limit.'''))
+    return avals[0]
 
 
 def integrate(function, *symbols: SymbolLimits, meijerg=None, conds='piecewise',
