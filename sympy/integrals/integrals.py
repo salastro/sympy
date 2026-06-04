@@ -386,6 +386,198 @@ class Integral(AddWithLimits):
 
         return self.func(newfunc, *newlimits)
 
+    def _apply_heaviside_hack(self, function):
+        """Normalize Heaviside functions to have consistent second argument."""
+        return function.replace(
+            lambda x: isinstance(x, Heaviside) and x.args[1]*2 != 1,
+            lambda x: Heaviside(x.args[0]))
+
+    def _handle_special_types(self, function, eval_kwargs, hints):
+        """
+        Handle special function types (MatrixBase, FormalPowerSeries).
+
+        Returns
+        =======
+        Expr | None
+            Result if a special type was handled, None otherwise.
+        """
+        if isinstance(function, MatrixBase):
+            return function.applyfunc(
+                lambda f: self.func(f, *self.limits).doit(**hints))
+
+        if isinstance(function, FormalPowerSeries):
+            if len(self.limits) > 1:
+                raise NotImplementedError
+            xab = self.limits[0]
+            if len(xab) > 1:
+                return function.integrate(xab, **eval_kwargs)
+            else:
+                return function.integrate(xab[0], **eval_kwargs)
+
+        return None
+
+    def _fix_variable_assumptions(self, hints):
+        """
+        Fix integration variable assumptions by replacing with better-typed dummies.
+
+        This method checks if definite integral limits have properties
+        (nonnegative, nonpositive, real) that conflict with the integration
+        variable's assumptions, and if so, re-runs doit with dummy variables
+        having matching assumptions.
+
+        Returns
+        =======
+        Expr | Tuple[Expr, ...] | None
+            The result if assumptions were fixed, None if no fixes needed.
+        """
+        reps = {}
+        for xab in self.limits:
+            if len(xab) != 3:
+                continue
+            x, a, b = xab
+            l = (a, b)
+            if all(i.is_nonnegative for i in l) and not x.is_nonnegative:
+                d = Dummy(positive=True)
+            elif all(i.is_nonpositive for i in l) and not x.is_nonpositive:
+                d = Dummy(negative=True)
+            elif all(i.is_real for i in l) and not x.is_real:
+                d = Dummy(real=True)
+            else:
+                d = None
+            if d:
+                reps[x] = d
+
+        if reps:
+            undo = {v: k for k, v in reps.items()}
+            did = self.xreplace(reps).doit(**hints)
+            if isinstance(did, tuple):  # when separate=True
+                did = tuple([i.xreplace(undo) for i in did])
+            else:
+                did = did.xreplace(undo)
+            return did
+
+        return None
+
+    def _try_meijerg_definite(self, function, xab, meijerg, conds):
+        """
+        Try to compute a definite integral using Meijer G-functions.
+
+        Parameters
+        ==========
+        function : Expr
+            The integrand
+        xab : Tuple
+            Integration limit tuple (x, a, b)
+        meijerg : bool | None
+            Whether Meijer G method is enabled
+        conds : str
+            How to handle conditions ('piecewise', 'separate', 'none')
+
+        Returns
+        =======
+        Expr | Tuple[Expr, Expr] | None
+            Result if successful, None otherwise.
+        """
+        ret = None
+        if len(xab) == 3 and meijerg is not False:
+            x, a, b = xab
+            try:
+                res = meijerint_definite(function, x, a, b)
+            except NotImplementedError:
+                _debug('NotImplementedError from meijerint_definite')
+                res = None
+            if res is not None:
+                f, cond = res
+                if conds == 'piecewise':
+                    u = self.func(function, (x, a, b))
+                    # if Piecewise modifies cond too much it may not be
+                    # recognized by _condsimp pattern matching so just
+                    # turn off all evaluation
+                    return Piecewise((f, cond), (u, True), evaluate=False)
+                elif conds == 'separate':
+                    if len(self.limits) != 1:
+                        raise ValueError(filldedent('''
+                            conds=separate not supported in
+                            multiple integrals'''))
+                    ret = f, cond
+                else:
+                    ret = f
+        return ret
+
+    def _apply_piecewise_rewrite(self, function, xab):
+        """
+        Rewrite function using Piecewise if it contains Min/Max or Abs.
+
+        Parameters
+        ==========
+        function : Expr
+            The integrand
+        xab : Tuple
+            The current limit tuple
+
+        Returns
+        =======
+        Expr
+            The rewritten function
+        """
+        if function.has(Abs, sign) and (
+            (len(xab) < 3 and all(x.is_extended_real for x in xab)) or
+            (len(xab) == 3 and all(x.is_extended_real and not x.is_infinite for
+             x in xab[1:]))):
+                # some improper integrals are better off with Abs
+                xr = Dummy("xr", real=True)
+                function = (function.xreplace({xab[0]: xr})
+                    .rewrite(Piecewise).xreplace({xr: xab[0]}))
+        elif function.has(Min, Max):
+            function = function.rewrite(Piecewise)
+
+        if (function.has(Piecewise) and
+            not isinstance(function, Piecewise)):
+                function = piecewise_fold(function)
+
+        return function
+
+    def _apply_atan_floor_correction(self, antideriv):
+        """
+        Apply floor-based corrections to atan/acot to ensure continuity.
+
+        This postprocessing adds floor terms to atan expressions that involve
+        tan or cot to make them continuous.
+
+        Parameters
+        ==========
+        antideriv : Expr
+            The antiderivative before correction
+
+        Returns
+        =======
+        Expr
+            The antiderivative with corrections applied
+        """
+        for atan_term in antideriv.atoms(atan):
+            atan_arg = atan_term.args[0]
+            # Checking `atan_arg` to be linear combination of `tan` or `cot`
+            for tan_part in atan_arg.atoms(tan):
+                x1 = Dummy('x1')
+                tan_exp1 = atan_arg.subs(tan_part, x1)
+                # The coefficient of `tan` should be constant
+                coeff = tan_exp1.diff(x1)
+                if x1 not in coeff.free_symbols:
+                    a = tan_part.args[0]
+                    antideriv = antideriv.subs(atan_term, Add(atan_term,
+                        sign(coeff)*pi*floor((a-pi/2)/pi)))
+            for cot_part in atan_arg.atoms(cot):
+                x1 = Dummy('x1')
+                cot_exp1 = atan_arg.subs(cot_part, x1)
+                # The coefficient of `cot` should be constant
+                coeff = cot_exp1.diff(x1)
+                if x1 not in coeff.free_symbols:
+                    a = cot_part.args[0]
+                    antideriv = antideriv.subs(atan_term, Add(atan_term,
+                        sign(coeff)*pi*floor((a)/pi)))
+
+        return antideriv
+
     def doit(self, **hints):
         """
         Perform the integration using any hints given.
@@ -440,8 +632,7 @@ class Integral(AddWithLimits):
         if self.is_zero:
             return S.Zero
 
-        # hacks to handle integrals of
-        # nested summations
+        # hacks to handle integrals of nested summations
         from sympy.concrete.summations import Sum
         if isinstance(self.function, Sum):
             if any(v in self.function.limits[0] for v in self.variables):
@@ -452,69 +643,23 @@ class Integral(AddWithLimits):
             _sum = self.function
             return _sum.func(_i.func(_sum.function, *_i.limits).doit(), *_sum.limits).doit()
 
-        # now compute and check the function
-        function = self.function
-
-        # hack to use a consistent Heaviside(x, 1/2)
-        function = function.replace(
-            lambda x: isinstance(x, Heaviside) and x.args[1]*2 != 1,
-            lambda x: Heaviside(x.args[0]))
+        # Apply Heaviside normalization
+        function = self._apply_heaviside_hack(self.function)
 
         if deep:
             function = function.doit(**hints)
         if function.is_zero:
             return S.Zero
 
-        # hacks to handle special cases
-        if isinstance(function, MatrixBase):
-            return function.applyfunc(
-                lambda f: self.func(f, *self.limits).doit(**hints))
+        # Handle special function types
+        special_result = self._handle_special_types(function, eval_kwargs, hints)
+        if special_result is not None:
+            return special_result
 
-        if isinstance(function, FormalPowerSeries):
-            if len(self.limits) > 1:
-                raise NotImplementedError
-            xab = self.limits[0]
-            if len(xab) > 1:
-                return function.integrate(xab, **eval_kwargs)
-            else:
-                return function.integrate(xab[0], **eval_kwargs)
-
-        # There is no trivial answer and special handling
-        # is done so continue
-
-        # first make sure any definite limits have integration
-        # variables with matching assumptions
-        reps = {}
-        for xab in self.limits:
-            if len(xab) != 3:
-                # it makes sense to just make
-                # all x real but in practice with the
-                # current state of integration...this
-                # doesn't work out well
-                # x = xab[0]
-                # if x not in reps and not x.is_real:
-                #     reps[x] = Dummy(real=True)
-                continue
-            x, a, b = xab
-            l = (a, b)
-            if all(i.is_nonnegative for i in l) and not x.is_nonnegative:
-                d = Dummy(positive=True)
-            elif all(i.is_nonpositive for i in l) and not x.is_nonpositive:
-                d = Dummy(negative=True)
-            elif all(i.is_real for i in l) and not x.is_real:
-                d = Dummy(real=True)
-            else:
-                d = None
-            if d:
-                reps[x] = d
-        if reps:
-            undo = {v: k for k, v in reps.items()}
-            did = self.xreplace(reps).doit(**hints)
-            if isinstance(did, tuple):  # when separate=True
-                did = tuple([i.xreplace(undo) for i in did])
-            else:
-                did = did.xreplace(undo)
-            return did
+        # Fix variable assumptions if needed
+        fixed_assumptions = self._fix_variable_assumptions(hints)
+        if fixed_assumptions is not None:
+            return fixed_assumptions
 
         # continue with existing assumptions
         undone_limits = []
@@ -542,120 +687,44 @@ class Integral(AddWithLimits):
                     function = factored_function
                 continue
 
-            if function.has(Abs, sign) and (
-                (len(xab) < 3 and all(x.is_extended_real for x in xab)) or
-                (len(xab) == 3 and all(x.is_extended_real and not x.is_infinite for
-                 x in xab[1:]))):
-                    # some improper integrals are better off with Abs
-                    xr = Dummy("xr", real=True)
-                    function = (function.xreplace({xab[0]: xr})
-                        .rewrite(Piecewise).xreplace({xr: xab[0]}))
-            elif function.has(Min, Max):
-                function = function.rewrite(Piecewise)
-            if (function.has(Piecewise) and
-                not isinstance(function, Piecewise)):
-                    function = piecewise_fold(function)
+            # Apply Piecewise rewriting heuristics
+            function = self._apply_piecewise_rewrite(function, xab)
+
             if isinstance(function, Piecewise):
                 if len(xab) == 1:
-                    antideriv = function._eval_integral(xab[0],
-                        **eval_kwargs)
+                    antideriv = function._eval_integral(xab[0], **eval_kwargs)
                 else:
-                    antideriv = self._eval_integral(
-                        function, xab[0], **eval_kwargs)
+                    antideriv = self._eval_integral(function, xab[0], **eval_kwargs)
             else:
-                # There are a number of tradeoffs in using the
-                # Meijer G method. It can sometimes be a lot faster
-                # than other methods, and sometimes slower. And
-                # there are certain types of integrals for which it
-                # is more likely to work than others. These
-                # heuristics are incorporated in deciding what
-                # integration methods to try, in what order. See the
-                # integrate() docstring for details.
-                def try_meijerg(function, xab):
-                    ret = None
-                    if len(xab) == 3 and meijerg is not False:
-                        x, a, b = xab
-                        try:
-                            res = meijerint_definite(function, x, a, b)
-                        except NotImplementedError:
-                            _debug('NotImplementedError '
-                                'from meijerint_definite')
-                            res = None
-                        if res is not None:
-                            f, cond = res
-                            if conds == 'piecewise':
-                                u = self.func(function, (x, a, b))
-                                # if Piecewise modifies cond too
-                                # much it may not be recognized by
-                                # _condsimp pattern matching so just
-                                # turn off all evaluation
-                                return Piecewise((f, cond), (u, True),
-                                    evaluate=False)
-                            elif conds == 'separate':
-                                if len(self.limits) != 1:
-                                    raise ValueError(filldedent('''
-                                        conds=separate not supported in
-                                        multiple integrals'''))
-                                ret = f, cond
-                            else:
-                                ret = f
-                    return ret
-
+                # Try Meijer G-function for definite integrals with infinite limits
+                antideriv = None
                 meijerg1 = meijerg
                 if (meijerg is not False and
                         len(xab) == 3 and xab[1].is_extended_real and xab[2].is_extended_real
                         and not function.is_Poly and
                         (xab[1].has(oo, -oo) or xab[2].has(oo, -oo))):
-                    ret = try_meijerg(function, xab)
+                    ret = self._try_meijerg_definite(function, xab, meijerg, conds)
                     if ret is not None:
                         function = ret
                         continue
                     meijerg1 = False
-                # If the special meijerg code did not succeed in
-                # finding a definite integral, then the code using
-                # meijerint_indefinite will not either (it might
-                # find an antiderivative, but the answer is likely
-                # to be nonsensical). Thus if we are requested to
-                # only use Meijer G-function methods, we give up at
-                # this stage. Otherwise we just disable G-function
-                # methods.
+
+                # If Meijer G failed or wasn't requested, try regular antiderivative
                 if meijerg1 is False and meijerg is True:
                     antideriv = None
                 else:
-                    antideriv = self._eval_integral(
-                        function, xab[0], **eval_kwargs)
+                    antideriv = self._eval_integral(function, xab[0], **eval_kwargs)
+                    # Try Meijer G again if regular antiderivative failed
                     if antideriv is None and meijerg is True:
-                        ret = try_meijerg(function, xab)
+                        ret = self._try_meijerg_definite(function, xab, meijerg, conds)
                         if ret is not None:
                             function = ret
                             continue
 
+            # Apply atan/cot floor correction in final round
             final = hints.get('final', True)
-            # dotit may be iterated but floor terms making atan and acot
-            # continuous should only be added in the final round
-            if (final and not isinstance(antideriv, Integral) and
-                antideriv is not None):
-                for atan_term in antideriv.atoms(atan):
-                    atan_arg = atan_term.args[0]
-                    # Checking `atan_arg` to be linear combination of `tan` or `cot`
-                    for tan_part in atan_arg.atoms(tan):
-                        x1 = Dummy('x1')
-                        tan_exp1 = atan_arg.subs(tan_part, x1)
-                        # The coefficient of `tan` should be constant
-                        coeff = tan_exp1.diff(x1)
-                        if x1 not in coeff.free_symbols:
-                            a = tan_part.args[0]
-                            antideriv = antideriv.subs(atan_term, Add(atan_term,
-                                sign(coeff)*pi*floor((a-pi/2)/pi)))
-                    for cot_part in atan_arg.atoms(cot):
-                        x1 = Dummy('x1')
-                        cot_exp1 = atan_arg.subs(cot_part, x1)
-                        # The coefficient of `cot` should be constant
-                        coeff = cot_exp1.diff(x1)
-                        if x1 not in coeff.free_symbols:
-                            a = cot_part.args[0]
-                            antideriv = antideriv.subs(atan_term, Add(atan_term,
-                                sign(coeff)*pi*floor((a)/pi)))
+            if (final and not isinstance(antideriv, Integral) and antideriv is not None):
+                antideriv = self._apply_atan_floor_correction(antideriv)
 
             if antideriv is None:
                 undone_limits.append(xab)
