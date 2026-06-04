@@ -20,7 +20,7 @@ from sympy.functions.elementary.exponential import log
 from sympy.functions.elementary.integers import floor
 from sympy.functions.elementary.complexes import Abs, sign
 from sympy.functions.elementary.miscellaneous import Min, Max
-from sympy.functions.special.singularity_functions import Heaviside
+from sympy.functions.special.delta_functions import Heaviside
 from .rationaltools import ratint
 from sympy.matrices import MatrixBase
 from sympy.polys import Poly, PolynomialError
@@ -996,15 +996,20 @@ class Integral(AddWithLimits):
         # nonelementary part (like erf(x) + exp(x)).  risch_integrate() is
         # quite fast, so this is acceptable.
         from sympy.simplify.fu import sincos_to_sum
+        from .strategies import try_strategies, TERM_STRATEGIES
+
+        # Prepare flags for strategy selection
+        flags = {
+            'meijerg': meijerg,
+            'risch': risch,
+            'manual': manual,
+            'heurisch': heurisch
+        }
+
         parts = []
         args = Add.make_args(f)
         for g in args:
             coeff, g = g.as_independent(x)
-
-            # g(x) = const
-            if g is S.One and not meijerg:
-                parts.append(coeff*x)
-                continue
 
             # g(x) = expr + O(x**n)
             order_term = g.getO()
@@ -1026,122 +1031,18 @@ class Integral(AddWithLimits):
                 # will fail, too.
                 return None
 
-            #               c
-            # g(x) = (a*x+b)
-            if g.is_Pow and not g.exp.has(x) and not meijerg:
-                a = Wild('a', exclude=[x])
-                b = Wild('b', exclude=[x])
-
-                M = g.base.match(a*x + b)
-
-                if M is not None:
-                    if g.exp == -1:
-                        h = log(g.base)
-                    elif conds != 'piecewise':
-                        h = g.base**(g.exp + 1) / (g.exp + 1)
-                    else:
-                        h1 = log(g.base)
-                        h2 = g.base**(g.exp + 1) / (g.exp + 1)
-                        h = Piecewise((h2, Ne(g.exp, -1)), (h1, True))
-
-                    parts.append(coeff * h / M[a])
-                    continue
-
-            #        poly(x)
-            # g(x) = -------
-            #        poly(x)
-            if g.is_rational_function(x) and not (manual or meijerg or risch):
-                parts.append(coeff * ratint(g, x))
-                continue
-
-            if not (manual or meijerg or risch):
-                # g(x) = Mul(trig)
-                h = trigintegrate(g, x, conds=conds)
-                if h is not None:
-                    parts.append(coeff * h)
-                    continue
-
-                # g(x) has at least a DiracDelta term
-                h = deltaintegrate(g, x)
-                if h is not None:
-                    parts.append(coeff * h)
-                    continue
-
-                from .singularityfunctions import singularityintegrate
-                # g(x) has at least a Singularity Function term
-                h = singularityintegrate(g, x)
-                if h is not None:
-                    parts.append(coeff * h)
-                    continue
-
-                # Try risch again.
-                if risch is not False:
-                    try:
-                        h, i = risch_integrate(g, x,
-                            separate_integral=True, conds=conds)
-                    except NotImplementedError:
-                        h = None
-                    else:
-                        if i:
-                            h = h + i.doit(risch=False)
-
-                        parts.append(coeff*h)
-                        continue
-
-                # fall back to heurisch
-                if heurisch is not False:
-                    from sympy.integrals.heurisch import (heurisch as heurisch_,
-                                                          heurisch_wrapper)
-                    try:
-                        if conds == 'piecewise':
-                            h = heurisch_wrapper(g, x, hints=[])
-                        else:
-                            h = heurisch_(g, x, hints=[])
-                    except PolynomialError:
-                        # XXX: this exception means there is a bug in the
-                        # implementation of heuristic Risch integration
-                        # algorithm.
-                        h = None
-            else:
-                h = None
-
-            if meijerg is not False and h is None:
-                # rewrite using G functions
-                try:
-                    h = meijerint_indefinite(g, x)
-                except NotImplementedError:
-                    _debug('NotImplementedError from meijerint_definite')
-                if h is not None:
-                    parts.append(coeff * h)
-                    continue
-
-            if h is None and manual is not False:
-                try:
-                    result = manualintegrate(g, x)
-                    if result is not None and not isinstance(result, Integral):
-                        if result.has(Integral) and not manual:
-                            # Try to have other algorithms do the integrals
-                            # manualintegrate can't handle,
-                            # unless we were asked to use manual only.
-                            # Keep the rest of eval_kwargs in case another
-                            # method was set to False already
-                            new_eval_kwargs = eval_kwargs
-                            new_eval_kwargs["manual"] = False
-                            new_eval_kwargs["final"] = False
-                            result = result.func(*[
-                                arg.doit(**new_eval_kwargs) if
-                                arg.has(Integral) else arg
-                                for arg in result.args
-                            ]).expand(multinomial=False,
-                                      log=False,
-                                      power_exp=False,
-                                      power_base=False)
-                        if not result.has(Integral):
-                            parts.append(coeff * result)
-                            continue
-                except (ValueError, PolynomialError):
-                    # can't handle some SymPy expressions
-                    pass
+            # Try integration strategies in order
+            h = try_strategies(
+                g, x,
+                TERM_STRATEGIES,
+                meijerg=meijerg,
+                risch=risch,
+                manual=manual,
+                heurisch=heurisch,
+                conds=conds,
+                eval_kwargs=eval_kwargs,
+                flags=flags
+            )
 
             # if we failed maybe it was because we had
             # a product that could have been expanded,
