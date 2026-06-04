@@ -166,6 +166,128 @@ class Integral(AddWithLimits):
         if self.function.is_zero is False and got_none is False:
             return False
 
+
+    def _find_integration_variable(self, x, d):
+        """Return the single integration variable present in *x*, or *d*."""
+        xfree = x.free_symbols.intersection(self.variables)
+        if len(xfree) > 1:
+            raise ValueError(
+                'F(x) can only contain one of: %s' % self.variables)
+        return xfree.pop() if xfree else d
+
+
+    def _unpack_substitution_target(self, u):
+        """
+        Normalise *u* to a ``(expr, symbol)`` pair.
+
+        Accepts either a bare expression (single free symbol inferred) or
+        an explicit ``(expr, symbol)`` tuple.
+        """
+        if isinstance(u, Expr):
+            ufree = u.free_symbols
+            if not ufree:
+                raise ValueError(filldedent('''
+                    f(u) cannot be a constant'''))
+            if len(ufree) > 1:
+                raise ValueError(filldedent('''
+                    When f(u) has more than one free symbol, the one replacing x
+                    must be identified: pass f(u) as (f(u), u)'''))
+            return u, ufree.pop()
+
+        # Tuple branch
+        u_expr, uvar = u
+        if uvar not in u_expr.free_symbols:
+            raise ValueError(filldedent('''
+                Expecting a tuple (expr, symbol) where symbol identifies a free
+                symbol in expr, but symbol is not in expr's free symbols.'''))
+        if not isinstance(uvar, Symbol):
+            raise ValueError(filldedent('''
+                Expecting a tuple (expr, symbol) but didn't get a symbol;
+                got %s''' % uvar))
+        return u_expr, uvar
+
+
+    def _derive_forward_and_inverse_maps(self, x, u, xvar, uvar, d, solve, posify):
+        """
+        Return ``(f_list, F_list)`` where each list holds candidate
+        expressions (substituted with the dummy *d*).
+
+        * ``f`` — the forward map  f(u),  substituting the new variable
+        * ``F`` — the inverse map  F(x),  substituting the old variable
+        """
+        if not x.is_Symbol:
+            # x is F(xvar); solve for f(uvar) from  u == x
+            F = [x.subs(xvar, d)]
+            soln = solve(u - x, xvar, check=False)
+            if not soln:
+                raise ValueError('no solution for solve(F(x) - f(u), x)')
+            f = [fi.subs(uvar, d) for fi in soln]
+        else:
+            # u is f(uvar); solve for F(xvar) from  u == x  (posified for sign)
+            f = [u.subs(uvar, d)]
+            pdiff, reps = posify(u - x)
+            puvar = uvar.subs([(v, k) for k, v in reps.items()])
+            soln = [s.subs(reps) for s in solve(pdiff, puvar)]
+            if not soln:
+                raise ValueError('no solution for solve(F(x) - f(u), u)')
+            F = [fi.subs(xvar, d) for fi in soln]
+
+        return f, F
+
+
+    def _apply_chain_rule_substitution(self, f, uvar, d):
+        """
+        Substitute each candidate in *f* into the integrand and require that
+        all candidates yield the same expression (uniqueness check).
+        """
+        newfuncs = {
+            (self.function.subs(d, fi) * fi.diff(d)).subs(d, uvar)  # chain rule
+            # Note: original used xvar; using d as the dummy throughout
+            for fi in f
+        }
+        # Rebuild using the original pattern to stay faithful
+        newfuncs = {
+            (self.function.subs(self._resolve_xvar_from_f(f), fi) * fi.diff(d)
+             ).subs(d, uvar)
+            for fi in f
+        }
+        if len(newfuncs) > 1:
+            raise ValueError(filldedent('''
+                The mapping between F(x) and f(u) did not give
+                a unique integrand.'''))
+        return newfuncs.pop()
+
+
+    def _remap_integration_bounds(self, F, xvar, uvar, d, newfunc):
+        """
+        Walk ``self.limits`` and replace bounds that involve *xvar* using *F*.
+
+        Returns ``(newlimits, newfunc)`` — the function may be negated when
+        the computed lower limit exceeds the upper limit.
+        """
+        newlimits = []
+        for xab in self.limits:
+            sym = xab[0]
+            if sym != xvar:
+                newlimits.append(xab)
+                continue
+
+            if len(xab) == 3:
+                a_val, b_val = xab[1], xab[2]
+                a = _calc_limit(F, a_val, b_val, d)
+                b = _calc_limit(F, b_val, a_val, d)
+                if fuzzy_bool(a - b > 0):
+                    a, b = b, a
+                    newfunc = -newfunc
+                newlimits.append((uvar, a, b))
+            elif len(xab) == 2:
+                a = _calc_limit(F, xab[1], 1, d)
+                newlimits.append((uvar, a))
+            else:
+                newlimits.append(uvar)
+
+        return newlimits, newfunc
+
     def transform(self, x, u):
         r"""
         Performs a change of variables from `x` to `u` using the relationship
@@ -269,40 +391,16 @@ class Integral(AddWithLimits):
         sympy.concrete.expr_with_limits.ExprWithLimits.variables : Lists the integration variables
         as_dummy : Replace integration variables with dummy ones
         """
+        from sympy.solvers.solvers import solve
+        from sympy.simplify.simplify import posify
+
         d = Dummy('d')
 
-        xfree = x.free_symbols.intersection(self.variables)
-        if len(xfree) > 1:
-            raise ValueError(
-                'F(x) can only contain one of: %s' % self.variables)
-        xvar = xfree.pop() if xfree else d
-
+        xvar = self._find_integration_variable(x, d)
         if xvar not in self.variables:
             return self
 
-        u = sympify(u)
-        if isinstance(u, Expr):
-            ufree = u.free_symbols
-            if len(ufree) == 0:
-                raise ValueError(filldedent('''
-                f(u) cannot be a constant'''))
-            if len(ufree) > 1:
-                raise ValueError(filldedent('''
-                When f(u) has more than one free symbol, the one replacing x
-                must be identified: pass f(u) as (f(u), u)'''))
-            uvar = ufree.pop()
-        else:
-            u, uvar = u
-            if uvar not in u.free_symbols:
-                raise ValueError(filldedent('''
-                Expecting a tuple (expr, symbol) where symbol identified
-                a free symbol in expr, but symbol is not in expr's free
-                symbols.'''))
-            if not isinstance(uvar, Symbol):
-                # This probably never evaluates to True
-                raise ValueError(filldedent('''
-                Expecting a tuple (expr, symbol) but didn't get
-                a symbol; got %s''' % uvar))
+        u, uvar = self._unpack_substitution_target(sympify(u))
 
         if x.is_Symbol and u.is_Symbol:
             return self.xreplace({x: u})
@@ -318,50 +416,11 @@ class Integral(AddWithLimits):
             u must contain the same variable as in x
             or a variable that is not already an integration variable'''))
 
-        from sympy.solvers.solvers import solve
-        if not x.is_Symbol:
-            F = [x.subs(xvar, d)]
-            soln = solve(u - x, xvar, check=False)
-            if not soln:
-                raise ValueError('no solution for solve(F(x) - f(u), x)')
-            f = [fi.subs(uvar, d) for fi in soln]
-        else:
-            f = [u.subs(uvar, d)]
-            from sympy.simplify.simplify import posify
-            pdiff, reps = posify(u - x)
-            puvar = uvar.subs([(v, k) for k, v in reps.items()])
-            soln = [s.subs(reps) for s in solve(pdiff, puvar)]
-            if not soln:
-                raise ValueError('no solution for solve(F(x) - f(u), u)')
-            F = [fi.subs(xvar, d) for fi in soln]
+        f, F = self._derive_forward_and_inverse_maps(x, u, xvar, uvar, d, solve, posify)
 
-        newfuncs = {(self.function.subs(xvar, fi)*fi.diff(d)
-                        ).subs(d, uvar) for fi in f}
-        if len(newfuncs) > 1:
-            raise ValueError(filldedent('''
-            The mapping between F(x) and f(u) did not give
-            a unique integrand.'''))
-        newfunc = newfuncs.pop()
+        newfunc = _apply_chain_rule_substitution(self, f, uvar, d)
 
-        newlimits = []
-        for xab in self.limits:
-            sym = xab[0]
-            if sym == xvar:
-                if len(xab) == 3:
-                    a_val, b_val = xab[1:]
-                    a = _calc_limit(F, a_val, b_val, d)
-                    b = _calc_limit(F, b_val, a_val, d)
-                    if fuzzy_bool(a - b > 0):
-                        a, b = b, a
-                        newfunc = -newfunc
-                    newlimits.append((uvar, a, b))
-                elif len(xab) == 2:
-                    a = _calc_limit(F, xab[1], 1, d)
-                    newlimits.append((uvar, a))
-                else:
-                    newlimits.append(uvar)
-            else:
-                newlimits.append(xab)
+        newlimits, newfunc = self._remap_integration_bounds(F, xvar, uvar, d, newfunc)
 
         return self.func(newfunc, *newlimits)
 
@@ -1345,14 +1404,14 @@ class Integral(AddWithLimits):
 
 def _is_indef_int(g, x):
     """Check if g is an indefinite integral with respect to x.
-    
+
     Parameters
     ==========
     g : Expr
         Expression to check
     x : Symbol
         Integration variable
-        
+
     Returns
     =======
     bool
@@ -1364,10 +1423,10 @@ def _is_indef_int(g, x):
 
 def _eval_factored(f, x, a, b):
     """Evaluate a factored integral with constant factors at limits.
-    
+
     Applies _eval_interval to indefinite integral factors and preserves
     non-integral constant factors.
-    
+
     Parameters
     ==========
     f : Expr
@@ -1376,7 +1435,7 @@ def _eval_factored(f, x, a, b):
         Integration variable
     a, b : Expr
         Lower and upper limits
-        
+
     Returns
     =======
     Expr
@@ -1395,10 +1454,10 @@ def _eval_factored(f, x, a, b):
 
 def _calc_limit_1(F, a, b, d):
     """Calculate limit of F as d → a, considering sign of b.
-    
+
     Replaces d with a using substitution if possible, otherwise uses limit.
     The sign of b is used to determine direction of approach.
-    
+
     Parameters
     ==========
     F : Expr
@@ -1409,7 +1468,7 @@ def _calc_limit_1(F, a, b, d):
         Sign reference value
     d : Symbol
         The dummy variable to substitute
-        
+
     Returns
     =======
     Expr
@@ -1423,10 +1482,10 @@ def _calc_limit_1(F, a, b, d):
 
 def _calc_limit(F_list, a, b, d):
     """Calculate limit from a list of F values.
-    
+
     Applies _calc_limit_1 to each element in F_list and verifies that
     all results are identical (to ensure a unique limit).
-    
+
     Parameters
     ==========
     F_list : list[Expr]
@@ -1437,12 +1496,12 @@ def _calc_limit(F_list, a, b, d):
         Sign reference value
     d : Symbol
         The dummy variable to substitute
-        
+
     Returns
     =======
     Expr
         The unique limit value
-        
+
     Raises
     ======
     ValueError
