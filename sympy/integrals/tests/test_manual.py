@@ -380,6 +380,22 @@ def test_manualintegrate_special_slow():
     assert_is_integral_of(f, F)
 
 
+def test_manualintegrate_dilog():
+    # Avoid using assert_is_integral_of here because F.diff(x).equals(f)
+    # returns None.
+    f = log(1-x)/x
+    F = -polylog(2, x)
+    assert manualintegrate(f, x) == F
+
+    f = log(2*x+3)/x
+    F = log(3)*log(Abs(x)) - polylog(2, -2*x/3)
+    assert manualintegrate(f, x) == F
+
+    f = cos(x)*log(1-sin(x))/sin(x)
+    F = -polylog(2, sin(x))
+    assert manualintegrate(f, x) == F
+
+
 @slow
 def test_manualintegrate_parts_special():
     f = fresnelc(x)*log(x)
