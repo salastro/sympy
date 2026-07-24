@@ -1117,6 +1117,24 @@ class PolylogRule(AtomicRule):
         return polylog(self.b + 1, self.a * self.variable)
 
 
+class DilogRule(AtomicRule):
+
+    __slots__ = ("a", "b")
+
+    a: Expr
+    b: Expr
+
+    def __init__(self, integrand: Expr, variable: Symbol, a: Expr, b: Expr) -> None:
+        super().__init__(integrand, variable)
+        self.a = a
+        self.b = b
+
+    def eval(self) -> Expr:
+        x = self.variable
+        a, b = self.a, self.b
+        return polylog(2, a*x/b + 1) + log(-a*x/b)*log(a*x+b)
+
+
 class UpperGammaRule(AtomicRule):
 
     __slots__ = ("a", "e")
@@ -1488,6 +1506,7 @@ def special_function_rule(integral):
             (cos, cos(quadratic_pattern, evaluate=False), None, FresnelCRule),
             (Mul, _symbol**e*exp(a*_symbol, evaluate=False), None, UpperGammaRule),
             (Mul, polylog(b, a*_symbol, evaluate=False)/_symbol, None, PolylogRule),
+            (Mul, log(a*_symbol + b, evaluate=False)/_symbol, None, DilogRule),
             (Pow, 1/sqrt(a - d*sin(_symbol, evaluate=False)**2),
                 lambda a, d: a != d, EllipticFRule),
             (Pow, sqrt(a - d*sin(_symbol, evaluate=False)**2),
