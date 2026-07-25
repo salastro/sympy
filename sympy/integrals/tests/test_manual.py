@@ -665,7 +665,7 @@ def test_issue_10847():
     assert manualintegrate(x**Rational(3,2) * log(x), x) == 2*x**Rational(5,2)*log(x)/5 - 4*x**Rational(5,2)/25
     assert manualintegrate(x**(-3) * log(x), x) == -log(x)/(2*x**2) - 1/(4*x**2)
     assert manualintegrate(log(y)/(y**2*(1 - 1/y)), y) == \
-        (-log(y) + log(y - 1))*log(y) + log(y)**2/2 - Integral(log(y - 1)/y, y)
+        (-log(y) + log(y - 1))*log(y) + log(y)**2/2 - log(y)*log(y - 1) - polylog(2, 1 - y)
 
 
 def test_issue_12899():
