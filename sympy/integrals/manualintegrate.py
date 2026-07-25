@@ -1132,7 +1132,12 @@ class DilogRule(AtomicRule):
     def eval(self) -> Expr:
         x = self.variable
         a, b = self.a, self.b
-        return polylog(2, a*x/b + 1) + log(-a*x/b)*log(a*x+b)
+        # Prefer to use simpler forms of dilog when possible, use other form
+        # when b is negative to avoid complex values.
+        if b.is_positive:
+            return log(b)*log(Abs(x)) - polylog(2, -a*x/b)
+        else:
+            return polylog(2, a*x/b + 1) + log(-a*x/b)*log(a*x + b)
 
 
 class UpperGammaRule(AtomicRule):
